@@ -1,8 +1,10 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
- Beck et al. 2019 Appendix A.3 Original Program Tensorflow 1 version
- Deep2BSDE solver with hard-coded Black-Scholes-Barenblatt equation. 
+ Beck et al. 2019 Appendix A.3 Original Program
+ Deep2BSDE solver with hard-coded Black-Scholes-Barenblatt equation.
+ 元のプログラムは、tensorflow 1.15(GCPで構築したTF1.15で検証)でもTable 6のように収束しない。
+ 修正点：Originalのプログラムに".compat.v1"を加えTF2.0対応　+　f/gamma/sigmaの式の修正 : line 31/44-55/158-180 + 初期値の変更: line 134 (0-1 -> 0-100)　
 """
 
 import time, datetime
@@ -11,9 +13,9 @@ import numpy as np
 from tensorflow.python.training import moving_averages
 
 start_time = time.time()
-tf.reset_default_graph()
+tf.compat.v1.reset_default_graph()
 
-name = 'BSB'
+name = 'BSB_TF2'
 d = 100
 batch_size = 64
 T = 1.0
@@ -26,7 +28,7 @@ n_neuronForA = [d,d,d,d]
 n_neuronForGamma = [d,d,d,d**2]
 Xinit = np.array([1.0,0.5]*50)
 mu = 0
-sigma = 0.4
+#sigma = 0.4
 sigma_min = 0.1
 sigma_max = 0.4
 r = 0.05
@@ -40,14 +42,23 @@ def sigma_value(W):
         sigma_min * tf.cast(tf.greater(tf.cast(0,tf.float64), W),
             tf.float64)
 
+            
+""" 
 def f_tf(t, X, Y, Z, Gamma):
-    return -0.5*tf.expand_dims(tf.trace(
+    return -0.5*tf.expand_dims(tf.compat.v1.trace(
         tf.square(tf.expand_dims(X,-1)) * \
             (tf.square(sigma_value(Gamma))-sigma**2) * Gamma),-1) + \
-                r * (Y - tf.reduce_sum(X*Z, 1, keep_dims = True))
+                r * (Y - tf.compat.v1.reduce_sum(X*Z, 1, keep_dims = True)) 
+"""
+def f_tf(t, X, Y, Z, Gamma):
+    return -0.5*tf.expand_dims(tf.compat.v1.trace(
+        tf.square(tf.expand_dims(X,-1)) * \
+            (tf.square(sigma_value(Gamma))) * Gamma),-1) + \
+                r * (Y - tf.compat.v1.reduce_sum(X*Z, 1, keep_dims = True)) 
+
 
 def g_tf(X):
-    return tf.reduce_sum(tf.square(X),1, keep_dims = True)
+    return tf.compat.v1.reduce_sum(tf.square(X),1, keep_dims = True)
 
 def sigma_function(X):
     return sigma * tf.matrix_diag(X)
@@ -57,7 +68,7 @@ def mu_function(X):
 
 
 def _one_time_net(x, name, isgamma = False):
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
         x_norm = _batch_norm(x, name='layer0_normalization')
         layer1 = _one_layer(x_norm, (1-isgamma)*n_neuronForA[1] \
             +isgamma*n_neuronForGamma[1], name = 'layer1')
@@ -70,11 +81,11 @@ def _one_time_net(x, name, isgamma = False):
 
 def _one_layer(input_, output_size, activation_fn=tf.nn.relu,stddev=5.0, name='linear'):
     
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
         shape = input_.get_shape().as_list()
-        w = tf.get_variable('Matrix', [shape[1], output_size],
+        w = tf.compat.v1.get_variable('Matrix', [shape[1], output_size],
         tf.float64,
-        tf.random_normal_initializer(
+        tf.compat.v1.random_normal_initializer(
                     stddev=stddev/np.sqrt(shape[1]+output_size)))
         hidden = tf.matmul(input_, w)
         hidden_bn = _batch_norm(hidden, name='normalization')
@@ -85,21 +96,21 @@ def _one_layer(input_, output_size, activation_fn=tf.nn.relu,stddev=5.0, name='l
 
 def _batch_norm(x, name):
     """Batch normalization"""
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
         params_shape = [x.get_shape()[-1]]
-        beta = tf.get_variable('beta', params_shape, tf.float64,
-                initializer=tf.random_normal_initializer(
+        beta = tf.compat.v1.get_variable('beta', params_shape, tf.float64,
+                initializer=tf.compat.v1.random_normal_initializer(
                     0.0, stddev=0.1, dtype=tf.float64))
-        gamma = tf.get_variable('gamma', params_shape, tf.float64,
-                initializer=tf.random_uniform_initializer(
+        gamma = tf.compat.v1.get_variable('gamma', params_shape, tf.float64,
+                initializer=tf.compat.v1.random_uniform_initializer(
                     0.1, 0.5, dtype=tf.float64))
-        moving_mean = tf.get_variable('moving_mean',
+        moving_mean = tf.compat.v1.get_variable('moving_mean',
                 params_shape, tf.float64,
-                initializer=tf.constant_initializer(0.0, tf.float64),
+                initializer=tf.compat.v1.constant_initializer(0.0, tf.float64),
                 trainable=False)
-        moving_variance = tf.get_variable('moving_variance',
+        moving_variance = tf.compat.v1.get_variable('moving_variance',
                 params_shape, tf.float64,
-                initializer=tf.constant_initializer(1.0, tf.float64),
+                initializer=tf.compat.v1.constant_initializer(1.0, tf.float64),
                 trainable=False)
         mean, variance = tf.nn.moments(x, [0], name='moments')
         _extra_train_ops.append(
@@ -111,29 +122,29 @@ def _batch_norm(x, name):
         y = tf.nn.batch_normalization(
             x, mean, variance, beta, gamma, 1e-6)
         y.set_shape(x.get_shape())
-    return y
+        return y
 
-with tf.Session() as sess:
+with tf.compat.v1.Session() as sess:
 
-    dW = tf.random_normal(shape=[batch_size, d],
+    dW = tf.compat.v1.random_normal(shape=[batch_size, d],
                         stddev = 1, dtype=tf.float64)
     X = tf.Variable(np.ones([batch_size, d]) * Xinit,
                     dtype=tf.float64,
                     trainable=False)
-    Y0 = tf.Variable(tf.random_uniform(
+    Y0 = tf.Variable(tf.compat.v1.random_uniform(
                     [1],
-                    minval=0, maxval=1, dtype=tf.float64),
+                    minval=0, maxval=50, dtype=tf.float64),
                     name='Y0')
-    Z0 = tf.Variable(tf.random_uniform(
+    Z0 = tf.Variable(tf.compat.v1.random_uniform(
                     [1, d],
                     minval=-.1, maxval=.1,
                     dtype=tf.float64),
                     name='Z0')
-    Gamma0 = tf.Variable(tf.random_uniform(
+    Gamma0 = tf.Variable(tf.compat.v1.random_uniform(
                     [d, d],
                     minval=-1, maxval=1,
                     dtype=tf.float64), name='Gamma0')
-    A0 = tf.Variable(tf.random_uniform(
+    A0 = tf.Variable(tf.compat.v1.random_uniform(
                     [1, d], minval=-.1, maxval=.1,
                     dtype=tf.float64), name='A0')
     allones = tf.ones(shape=[batch_size, 1], dtype=tf.float64,
@@ -143,44 +154,48 @@ with tf.Session() as sess:
     A = tf.matmul(allones, A0)
     Gamma = tf.multiply(tf.ones(shape=[batch_size, d, d],
                     dtype=tf.float64), Gamma0)
-    with tf.variable_scope('forward'):
+    with tf.compat.v1.variable_scope('forward'):
         for t in range(0, N-1):
             # Y update inside the loop
-            dX = mu * X * h + sqrth * sigma * X * dW
+            sigma_ = sigma_value(tf.reshape(tf.compat.v1.trace(Gamma), [batch_size, 1]))
+            dX = mu * X * h + sqrth * sigma_ *X* dW
             Y = Y + f_tf(t * h, X, Y, Z, Gamma)*h \
-                            + tf.reduce_sum(Z*dX, 1, keep_dims = True)
-            X = X + dX
+                            + tf.reshape(tf.compat.v1.trace(Gamma), [batch_size, 1])*tf.square(sigma_)*(X**2)* h*0.5 \
+                            + tf.compat.v1.reduce_sum(Z*dX, 1, keep_dims = True)
             # Z update inside the loop
             Z = Z + A * h \
                             + tf.squeeze(tf.matmul(Gamma,
                                         tf.expand_dims(dX, -1),
                                                     transpose_b=False))
+            X = X + dX
             A = _one_time_net(X, str(t+1)+"A" )/d
             Gamma = _one_time_net(X, str(t+1)+"Gamma",
                         isgamma = True)/d**2
             Gamma = tf.reshape(Gamma, [batch_size, d, d])
-            dW = tf.random_normal(shape=[batch_size, d],
+            dW = tf.compat.v1.random_normal(shape=[batch_size, d],
                         stddev = 1, dtype=tf.float64)
-            # Y update outside of the loop - terminal time step
-            dX = mu * X * h + sqrth * sigma * X * dW
-            Y = Y + f_tf((N-1) * h, X, Y, Z, Gamma)*h \
-                            + tf.reduce_sum(Z * dX, 1, keep_dims=True)
-            X = X + dX
-            loss = tf.reduce_mean(tf.square(Y-g_tf(X)))
+        # Y update outside of the loop - terminal time step
+        sigma_ = sigma_value(X)
+        dX = mu * X * h + sqrth * sigma_ *  dW
+        Y = Y + f_tf((N-1) * h, X, Y, Z, Gamma)*h \
+                        + tf.reshape(tf.compat.v1.trace(Gamma), [batch_size, 1])*tf.square(sigma_)*(X**2) *h*0.5 \
+                        + tf.compat.v1.reduce_sum(Z * dX, 1, keep_dims=True)
+        X = X + dX
+        loss = tf.reduce_mean(tf.square(Y-g_tf(X)))
 
     # training operations
-    global_step = tf.get_variable('global_step', [],
-                initializer=tf.constant_initializer(0),
+    global_step = tf.compat.v1.get_variable('global_step', [],
+                initializer=tf.compat.v1.constant_initializer(0),
                 trainable=False, dtype=tf.int32)
 
-    learning_rate = tf.train.exponential_decay(1.0, global_step,
+    learning_rate = tf.compat.v1.train.exponential_decay(1.0, global_step,
                 decay_steps = 200,
                 decay_rate = 0.5,
                 staircase=True)
 
-    trainable_variables = tf.trainable_variables()
+    trainable_variables = tf.compat.v1.trainable_variables()
     grads = tf.gradients(loss, trainable_variables)
-    optimizer = tf.train.AdamOptimizer(
+    optimizer = tf.compat.v1.train.AdamOptimizer(
             learning_rate=learning_rate
                 )
     apply_op = optimizer.apply_gradients(
@@ -198,7 +213,7 @@ with tf.Session() as sess:
     losses = []
     running_time = []
     steps = []
-    sess.run(tf.global_variables_initializer())
+    sess.run(tf.compat.v1.global_variables_initializer())
 
     try:
 
@@ -232,8 +247,8 @@ output[:,1] = losses
 output[:,2] = y0_values
 output[:,3] = learning_rates
 output[:,4] = running_time
-np.savetxt("./" + str(name) + "_d" + str(d) + "_" + \
-    datetime.datetime.now().strftime('%Y-%m-%d-%H:%M:%S') + ".csv",
+np.savetxt(str(name) + "_d" + str(d) + "_" + \
+    datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S') + ".csv",
     output,
     delimiter = ",",
     header = "step, loss function, Y0, learning rate, running time"
