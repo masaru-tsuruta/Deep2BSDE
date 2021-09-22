@@ -175,7 +175,7 @@ with tf.compat.v1.Session() as sess:
             dW = tf.compat.v1.random_normal(shape=[batch_size, d],
                         stddev = 1, dtype=tf.float64)
         # Y update outside of the loop - terminal time step
-        sigma_ = sigma_value(X)
+        sigma_ = sigma_value(tf.reshape(tf.compat.v1.trace(Gamma), [batch_size, 1]))
         dX = mu * X * h + sqrth * sigma_ *  dW
         Y = Y + f_tf((N-1) * h, X, Y, Z, Gamma)*h \
                         + tf.reshape(tf.compat.v1.trace(Gamma), [batch_size, 1])*tf.square(sigma_)*(X**2) *h*0.5 \
@@ -247,7 +247,7 @@ output[:,1] = losses
 output[:,2] = y0_values
 output[:,3] = learning_rates
 output[:,4] = running_time
-np.savetxt(str(name) + "_d" + str(d) + "_" + \
+np.savetxt("output/"+str(name) + "_d" + str(d) + "_" + \
     datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S') + ".csv",
     output,
     delimiter = ",",

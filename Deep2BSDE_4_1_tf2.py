@@ -190,7 +190,7 @@ output[:, 2] = y0_values
 output[:, 3] = learning_rates
 output[:, 4] = running_time
 
-np.savetxt(str(name) + "_d" + str(d) + "_" +
+np.savetxt("output/"+str(name) + "_d" + str(d) + "_" +
            datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')+".csv",
            output,
            delimiter=",",

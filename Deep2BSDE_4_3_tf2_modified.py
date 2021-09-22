@@ -3,9 +3,9 @@
 """
  Deep2BSDE solver with hard-coded Black-Scholes-Barenblatt equation.
  module : tensorflow 2.5.0 / tensorflow_probability 0.13.0
- - tensorflow 2向けにコードを全体的に修正
- - Gamma(Hessian)が対称行列になるように下三角行列を推定し、その転置行列との積をGammaとするように変更
- - 長く推定を続けるとy0の値が不安定になる。具体的には、推定を続けるとlossが最も小さいレンジからはずれy0から外れ、また再度lossが最も小さいレンジに戻ってくることを繰り返す。
+ - tensorflow 2向けにコードを全体的に修正。
+ - 長く推定を続けるとy0の値が不安定になる。
+ - Batch Normalizationを入れると推定結果が不安定になるため外している。
 """
 
 import time, datetime
@@ -23,8 +23,8 @@ T = 1.0
 N = 20
 h = T/N
 sqrth = np.sqrt(h)
-n_maxstep = 2000
-n_displaystep = 100
+n_maxstep = 10000
+n_displaystep = 50
 Xinit = np.array([1.0,0.5]*int(d/2))
 mu = 0
 sigma = 0.4
@@ -50,24 +50,37 @@ def g_tf(X):
     return tf.reduce_sum(tf.square(X),1, keepdims = True)
 
 class Dense(tf.Module):
-    def __init__(self, input_dim, output_size, name=None):
+    def __init__(self, input_dim, output_size, activation, is_last, name=None):
         super(Dense, self).__init__(name=name)
-        self.w = tf.Variable(
-            tf.random.normal([input_dim, output_size]), name='w')
-        self.b = tf.Variable(tf.zeros([output_size]), name='b')
-        #self.BN = tf.keras.layers.BatchNormalization()
+        with self.name_scope:
+            self.w = tf.Variable(
+                tf.random.normal([input_dim, output_size],
+                                 mean=0,stddev=5/np.sqrt(input_dim+output_size)), name='w')
+            #self.b = tf.Variable(tf.zeros([output_size]), name='b')
+            #self.BN = tf.keras.layers.BatchNormalization()
+            self.activation = activation
+            self.is_last = is_last
+    @tf.Module.with_name_scope
     def __call__(self, x):
-        y = tf.matmul(x, self.w) + self.b
+        y = tf.matmul(x, self.w) #+ self.b
         #y = self.BN(y)
-        return tf.nn.relu(y)
+        if self.activation == "ReLU":
+            y = tf.nn.relu(y)
+        return y
 
 class MLP(tf.Module):
-    def __init__(self, input_size, sizes, name=None):
+    def __init__(self, input_size, sizes, activations, name=None):
         super(MLP, self).__init__(name=name)
         self.layers = []
         with self.name_scope:
-            for size in sizes:
-                self.layers.append(Dense(input_dim=input_size, output_size=size))
+            #self.BN = tf.keras.layers.BatchNormalization()
+            #self.layers.append(self.BN)
+            for _k, (size, act_fun) in enumerate(zip(sizes,activations)):
+                self.layers.append(Dense(input_dim=input_size, 
+                                         output_size=size,
+                                         activation=act_fun,
+                                         is_last=(_k == (len(sizes)-1))
+                                         ))
                 input_size = size
     @tf.Module.with_name_scope
     def __call__(self, x):
@@ -82,32 +95,23 @@ class forward(tf.Module):
         with self.name_scope:
             for t in range(N-1):
                 mlps = []
-                mlps.append(MLP(input_size=d, sizes=[d,d,d]))
-                mlps.append(MLP(input_size=d, sizes=[d,d,int(d*(d+1)/2)]))
+                mlps.append(MLP(input_size=d, sizes=[d,d,d],activations=["ReLU","ReLU","Linear"]))
+                mlps.append(MLP(input_size=d, sizes=[d,d,d**2],activations=["ReLU","ReLU","Linear"]))
                 self.mlps.append(mlps)
     @tf.Module.with_name_scope
     def __call__(self, X, Y, Z, A, Gamma):
-        for t,mlps in zip(range(N-1),self.mlps):
-            
-            sigma_ = sigma_value(tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1]))
-            
-            dW = tf.random.normal(shape=[batch_size, d], stddev = 1, dtype=tf.float32)
-            
+        for t,mlps in zip(range(N-1),self.mlps):            
+            sigma_ = sigma_value(tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1]))            
+            dW = tf.random.normal(shape=[batch_size, d], stddev = 1, dtype=tf.float32)            
             # Y update inside the loop
             dX = mu * X * h + sqrth * sigma_ * X * dW
-
             Y = Y + f_tf(t * h, X, Y, Z, Gamma)*h \
                     + tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1])*tf.square(sigma_)*(X**2)* h*0.5 \
-                    + tf.reduce_sum(Z*dX, 1, keepdims = True)
-                    
-            Z = Z + A * h + tf.squeeze(tf.matmul(Gamma, tf.expand_dims(dX, -1), transpose_b=False))
-            
-            X = X + dX
-            
+                    + tf.reduce_sum(Z*dX, 1, keepdims = True)                    
+            Z = Z + A * h + tf.squeeze(tf.matmul(Gamma, tf.expand_dims(dX, -1), transpose_b=False))            
+            X = X + dX            
             A = mlps[0](X)/d
-            Gamma = mlps[1](X)/d**2
-            Gamma = tfp.math.fill_triangular(Gamma)
-            Gamma = tf.matmul(Gamma , tf.transpose(Gamma,perm=[0,2,1]))
+            Gamma = mlps[1](X)/d**2            
             Gamma = tf.reshape(Gamma, [batch_size, d, d])
             
         sigma_ = sigma_value(tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1]))
@@ -142,7 +146,7 @@ class Deep2BSDE(tf.Module):
                                                     minval=-.1, maxval=.1,
                                                     dtype=tf.float32),
                                 name='Z0')
-            self.Gamma0 = tf.Variable(tf.random.uniform([int(d*(d+1)/2)],
+            self.Gamma0 = tf.Variable(tf.random.uniform([d,d],
                                                 minval=-1, maxval=1,
                                                 dtype=tf.float32),
                                     name='Gamma0')
@@ -160,17 +164,17 @@ class Deep2BSDE(tf.Module):
         Z = tf.matmul(allones, self.Z0)
         A = tf.matmul(allones, self.A0)
         
-        Gamma = tfp.math.fill_triangular(self.Gamma0)
-        Gamma = tf.matmul(Gamma , tf.transpose(Gamma))
         Gamma = tf.multiply(tf.ones(shape=[batch_size, d, d],
                                         dtype=tf.float32), 
-                                Gamma)
+                                self.Gamma0)
         
         loss = self.fwd(self.X,Y,Z,A,Gamma)
         return loss
     
 
 model = Deep2BSDE()
+model()
+print(len(model.trainable_variables))
 
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.9)
 
@@ -207,7 +211,7 @@ output[:,0] = steps
 output[:,1] = losses
 output[:,2] = y0_values
 output[:,3] = running_time
-np.savetxt(str(name) + "_d" + str(d) + "_" + \
+np.savetxt("output/"+str(name) + "_d" + str(d) + "_" + \
     datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S') + ".csv",
     output,
     delimiter = ",",

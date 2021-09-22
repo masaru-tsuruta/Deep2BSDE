@@ -1,9 +1,10 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
- BS modelに変更したプログラム
- time discretizationの刻み（N）を増やすと処理時間が増える。(MLPの数/パラメータも増える)
- 収束速度は不安定-> strike/spotのスケールを100で割って調整した方が収束が速くBatch Normalizationがワークする。
+ Deep2BSDE solver with hard-coded Black-Scholes-Barenblatt equation.
+ module : tensorflow 2.5.0 / tensorflow_probability 0.13.0
+ - tensorflow 2向けにコードを全体的に修正。
+ - 長く推定を続けるとy0の値が不安定になる。
 """
 
 import time, datetime
@@ -14,31 +15,38 @@ import tensorflow_probability as tfp
 
 start_time = time.time()
 
-name = 'BS_TF2_ADJ'
-d = 10
+name = 'BSB_TF2_ADJ'
+d = 100
 batch_size = 64
 T = 1.0
 N = 20
 h = T/N
 sqrth = np.sqrt(h)
-n_maxstep = 1000
-n_displaystep = 20
-SCALE = 100
-Xinit = np.array([100]*d)/SCALE
+n_maxstep = 10000
+n_displaystep = 50
+Xinit = np.array([1.0,0.5]*int(d/2))
 mu = 0
-sigma = 0.1
-K = 100/SCALE
+sigma = 0.4
+sigma_min = 0.1
+sigma_max = 0.4
 r = 0.05
 
-def f_tf(t, X, Y, Z, Gamma):
-    return -0.5*(sigma**2)*tf.expand_dims(tf.linalg.trace(
-        tf.square(tf.expand_dims(X,-1)) * Gamma),-1) + \
-                r * (Y - tf.math.reduce_sum(X*Z, 1, keepdims = True)) 
 
-def _opt(X_):
-    a = tf.zeros([batch_size, 1], dtype=tf.float32)
-    X_ = tf.where(X_ < a, a, X_)
-    return X_
+def sigma_value(W):
+    return sigma_max * \
+        tf.cast(tf.greater_equal(W, tf.cast(0,tf.float32)),
+        tf.float32) + \
+            sigma_min * tf.cast(tf.greater(tf.cast(0,tf.float32), W),
+            tf.float32)
+
+def f_tf(t, X, Y, Z, Gamma):
+    return -0.5*tf.expand_dims(tf.linalg.trace(
+        tf.square(tf.expand_dims(X,-1)) * \
+            (tf.square(sigma_value(Gamma))) * Gamma),-1) + \
+                r * (Y - tf.reduce_sum(X*Z, 1, keepdims = True))
+
+def g_tf(X):
+    return tf.reduce_sum(tf.square(X),1, keepdims = True)
 
 class Dense(tf.Module):
     def __init__(self, input_dim, output_size, activation, is_last, name=None):
@@ -46,13 +54,13 @@ class Dense(tf.Module):
         with self.name_scope:
             self.w = tf.Variable(
                 tf.random.normal([input_dim, output_size],mean=0,stddev=5/np.sqrt(input_dim+output_size)), name='w')
-            self.b = tf.Variable(tf.zeros([output_size]), name='b')
+            #self.b = tf.Variable(tf.zeros([output_size]), name='b')
             self.BN = tf.keras.layers.BatchNormalization()
             self.activation = activation
             self.is_last = is_last
     @tf.Module.with_name_scope
     def __call__(self, x):
-        y = tf.matmul(x, self.w) + self.b
+        y = tf.matmul(x, self.w) 
         if self.is_last == False:
             y = self.BN(y)
         if self.activation == "ReLU":
@@ -63,7 +71,9 @@ class MLP(tf.Module):
     def __init__(self, input_size, sizes, activations, name=None):
         super(MLP, self).__init__(name=name)
         self.layers = []
+        self.BN = tf.keras.layers.BatchNormalization()
         with self.name_scope:
+            self.layers.append(self.BN)
             for _k, (size, act_fun) in enumerate(zip(sizes,activations)):
                 self.layers.append(Dense(input_dim=input_size, 
                                          output_size=size,
@@ -89,38 +99,34 @@ class forward(tf.Module):
                 self.mlps.append(mlps)
     @tf.Module.with_name_scope
     def __call__(self, X, Y, Z, A, Gamma):
-        for t,mlps in zip(range(N-1),self.mlps):
-            
-            dW = tf.random.normal(shape=[batch_size, d], stddev = 1, dtype=tf.float32)
-            
+        for t,mlps in zip(range(N-1),self.mlps):            
+            sigma_ = sigma_value(tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1]))            
+            dW = tf.random.normal(shape=[batch_size, d], stddev = 1, dtype=tf.float32)            
             # Y update inside the loop
-            dX = r * h * X + \
-                    sqrth * sigma * X * dW
-
+            dX = mu * X * h + sqrth * sigma_ * X * dW
             Y = Y + f_tf(t * h, X, Y, Z, Gamma)*h \
-                    + tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1])*tf.square(sigma)*(X**2)* h*0.5 \
-                    + tf.reduce_sum(Z*dX, 1, keepdims = True)
-                    
-            Z = Z + A * h + tf.squeeze(tf.matmul(Gamma, tf.expand_dims(dX, -1), transpose_b=False))
-            
-            X = X + dX
-            
+                    + tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1])*tf.square(sigma_)*(X**2)* h*0.5 \
+                    + tf.reduce_sum(Z*dX, 1, keepdims = True)                    
+            Z = Z + A * h + tf.squeeze(tf.matmul(Gamma, tf.expand_dims(dX, -1), transpose_b=False))            
+            X = X + dX            
             A = mlps[0](X)/d
-            Gamma = mlps[1](X)/d**2
+            Gamma = mlps[1](X)/d**2            
             Gamma = tf.reshape(Gamma, [batch_size, d, d])
             
+        sigma_ = sigma_value(tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1]))
+        
         dW = tf.random.normal(shape=[batch_size, d], stddev = 1, dtype=tf.float32)
             
         # Y update inside the loop
-        dX = r * h * X + sqrth * sigma * X * dW
+        dX = mu * X * h + sqrth * sigma_ * X * dW
 
         Y = Y + f_tf((N-1) * h, X, Y, Z, Gamma)*h \
-                + tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1])*tf.square(sigma)*(X**2)* h*0.5 \
+                + tf.reshape(tf.linalg.trace(Gamma), [batch_size, 1])*tf.square(sigma_)*(X**2)* h*0.5 \
                 + tf.reduce_sum(Z*dX, 1, keepdims = True)
 
         X = X + dX
             
-        loss = tf.reduce_mean(tf.square(Y-_opt(X-K)*SCALE))
+        loss = tf.reduce_mean(tf.square(Y-g_tf(X)))
 
         return loss
 
@@ -164,47 +170,3 @@ class Deep2BSDE(tf.Module):
         loss = self.fwd(self.X,Y,Z,A,Gamma)
         return loss
     
-
-model = Deep2BSDE()
-
-optimizer = tf.keras.optimizers.Adam(learning_rate=0.9)
-
-@tf.function
-def train_step():
-  with tf.GradientTape() as tape:
-    loss  = model()
-  gradients = tape.gradient(loss, model.trainable_variables)
-  optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-  
-  return loss
-
-y0_values = []
-steps = []
-losses = []
-running_time = []
-
-for epoch in range(n_maxstep):
-    loss = train_step()
-    Y = model.trainable_variables[2].numpy()
-    template = 'Epoch {}, Loss: {:.0f}, y0: {:.3f}'
-    if ((epoch+1) % n_displaystep) ==0:
-        steps.append(epoch+1)
-        losses.append(loss)
-        y0_values.append(Y)
-        running_time.append(time.time()-start_time)
-        print(template.format(epoch+1,
-                              loss,Y[0]
-                              )
-              )
-
-output = np.zeros((len(y0_values),4))
-output[:,0] = steps
-output[:,1] = losses
-output[:,2] = y0_values
-output[:,3] = running_time
-np.savetxt("output/"+str(name) + "_d" + str(d) + "_" + \
-    datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S') + ".csv",
-    output,
-    delimiter = ",",
-    header = "step, loss function, Y0, running time"
-    )
